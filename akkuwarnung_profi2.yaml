@@ -1,0 +1,118 @@
+blueprint:
+  name: Dynamische Akkuwarnung (Profi)
+  description: Vollautomatische Akkuwarnung mit Push, Alexa, Snooze und ACK.
+  domain: automation
+  input:
+    devices:
+      name: Batterie-Geräte
+      description: Liste aller Geräte mit Sensor, ACK-Boolean und Snooze-Datetime.
+      selector:
+        object:
+
+mode: parallel
+
+variables:
+  devices: !input devices
+
+trigger:
+  - platform: time_pattern
+    minutes: "/10"
+  - platform: event
+    event_type: mobile_app_notification_action
+  - platform: state
+    entity_id: "{{ devices.keys() | list }}"
+
+condition: []
+
+action:
+  - choose:
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'event' }}"
+        sequence:
+          - variables:
+              action: "{{ trigger.event.data.action }}"
+              key: "{{ action.split('_', 3)[-1] }}"
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ action.startswith('LOWBAT_OK_') }}"
+                sequence:
+                  - service: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ devices[key].ack }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ action.startswith('LOWBAT_LATER_') }}"
+                sequence:
+                  - service: input_datetime.set_datetime
+                    target:
+                      entity_id: "{{ devices[key].snooze }}"
+                    data:
+                      datetime: "{{ (now() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'state' }}"
+          - condition: template
+            value_template: "{{ (states(trigger.entity_id) | float(0)) >= 20 }}"
+        sequence:
+          - variables:
+              key: "{{ trigger.entity_id }}"
+          - service: input_boolean.turn_off
+            target:
+              entity_id: "{{ devices[key].ack }}"
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ devices[key].snooze }}"
+            data:
+              datetime: "2000-01-01 00:00:00"
+
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.platform == 'time_pattern' }}"
+        sequence:
+          - repeat:
+              for_each: "{{ devices }}"
+              sequence:
+                - variables:
+                    sensor: "{{ repeat.item.sensor }}"
+                    ack: "{{ repeat.item.ack }}"
+                    snooze: "{{ repeat.item.snooze }}"
+                    name: "{{ repeat.item.name }}"
+                    level: "{{ states(sensor) | float(999) }}"
+                    ack_state: "{{ states(ack) }}"
+                    snooze_ts: "{{ state_attr(snooze, 'timestamp') | float(0) }}"
+                - if:
+                    - condition: template
+                      value_template: "{{ level < 20 }}"
+                    - condition: template
+                      value_template: "{{ ack_state == 'off' }}"
+                    - condition: template
+                      value_template: "{{ snooze_ts <= as_timestamp(now()) }}"
+                  then:
+                    - service: notify.alexa_media
+                      data:
+                        message: "Der Batteriestand von {{ name }} ist zu gering."
+                        target:
+                          - media_player.volkers_echo_show
+                        data:
+                          type: announce
+
+                    - service: notify.mobile_app_volkers_iphone
+                      data:
+                        title: "Akkuwarnung"
+                        message: "{{ name }} hat nur noch {{ level | int }}% Akku."
+                        data:
+                          actions:
+                            - action: "LOWBAT_OK_{{ name | replace(' ', '_') | upper }}"
+                              title: "Verstanden"
+                            - action: "LOWBAT_LATER_{{ name | replace(' ', '_') | upper }}"
+                              title: "Später erinnern"
+
+                    - service: input_datetime.set_datetime
+                      target:
+                        entity_id: "{{ snooze }}"
+                      data:
+                        datetime: "{{ (now() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S') }}"
